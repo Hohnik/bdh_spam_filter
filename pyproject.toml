@@ -10,6 +10,7 @@ dependencies = [
     "requests>=2.32.0",
     "tqdm>=4.67.0",
     "datasets>=2.20.0",
+    "optuna>=4.7.0",
 ]
 
 [project.optional-dependencies]
