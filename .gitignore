@@ -8,3 +8,4 @@ checkpoints/
 .pytest_cache/
 dist/
 *.egg-info/
+.env
