@@ -10,7 +10,7 @@ The script:
   4. Saves the best checkpoint (by val F1) to checkpoints/
 
 On a typical home server (no GPU, modern CPU):
-  ~4,500 parameter model, 3 000 steps ≈ 5-10 minutes.
+  ~3.2M parameter model; run scripts/benchmark.py for accurate time estimates.
 """
 
 import argparse
@@ -29,18 +29,23 @@ from src.training.trainer import Trainer, TrainerConfig
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train BDH spam filter")
-    parser.add_argument("--steps",  type=int, default=3000,  help="Training steps")
-    parser.add_argument("--device", type=str, default="cpu", help="cpu | mps | cuda")
-    parser.add_argument("--lr",     type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--batch",  type=int, default=32,    help="Batch size")
-    parser.add_argument("--data-dir",  default="data",        help="Dataset cache dir")
-    parser.add_argument("--ckpt-dir",  default="checkpoints", help="Checkpoint output dir")
+    parser.add_argument("--steps",   type=int,   default=5000,  help="Training steps")
+    parser.add_argument("--device",  type=str,   default="cpu", help="cpu | mps | cuda")
+    parser.add_argument("--lr",      type=float, default=3e-4,  help="Learning rate")
+    parser.add_argument("--batch",   type=int,   default=32,    help="Batch size")
+    parser.add_argument("--embd",    type=int,   default=128,   help="n_embd (model width)")
+    parser.add_argument("--dropout", type=float, default=0.1,   help="Dropout rate")
+    parser.add_argument("--data-dir",  default="data",          help="Dataset cache dir")
+    parser.add_argument("--ckpt-dir",  default="checkpoints",   help="Checkpoint output dir")
     args = parser.parse_args()
 
     # ── Data ──────────────────────────────────────────────────────────────────
     samples = download_all(Path(args.data_dir))
 
-    model_config = SpamClassifierConfig()
+    model_config = SpamClassifierConfig(
+        n_embd   = args.embd,
+        dropout  = args.dropout,
+    )
     train_loader, val_loader = build_dataloaders(
         samples,
         seq_len         = model_config.chunk_size,

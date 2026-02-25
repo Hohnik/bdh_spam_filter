@@ -137,18 +137,61 @@ tests/
 
 ---
 
-## Model size
+## Model size & benchmark results (M1 Mac)
 
 Default config (home-server optimised):
 
 | Hyperparameter | Value | Rationale |
 |---|---|---|
-| `n_embd` | 128 | 4× smaller than the LM repo; enough for binary classification |
-| `n_layer` | 2 | Per-layer params; diminishing returns beyond 2 (see logbook) |
+| `n_embd` | 128 | Tunable via Optuna; 128 is the default starting point |
+| `n_layer` | 2 | Per-layer params; diminishing returns beyond 2 (logbook Entry 5) |
 | `n_head` | 4 | 2 diff-attn groups |
-| `mlp_internal_dim_multiplier` | 32 | N=1024 — sweet spot quality/speed (logbook Entry 13) |
-| `max_seq_len` | 512 | Covers 95%+ of emails in one pass |
+| `mlp_internal_dim_multiplier` | 32 | N=1024 per head — sweet spot (logbook Entry 13) |
+| `chunk_size` | 256 | Subject + body opening; 4× faster than T=512 (measured) |
+| `max_position` | 4096 | RoPE table; handles emails up to 4 096 bytes |
 | `diff_attn` | True | Δ=-0.019 val loss (logbook Entry 15) |
-| `attn_window` | 64 | Δ=-0.032 val loss; acts as regularisation (logbook Entry 16) |
+| `attn_window` | 64 | Δ=-0.032 val loss; regularisation (logbook Entry 16) |
 
-Total: **~450K parameters** — trains in minutes on CPU, inference in milliseconds.
+Total: **~3.2M parameters**, 12 MB fp32.
+
+### Measured throughput (M1 Mac, `scripts/benchmark.py`)
+
+| Device | B | T | ms/step | Inference | Emails/s |
+|---|---|---|---|---|---|
+| CPU | 8 | 128 | 193 ms | 8.9 ms | 41/s |
+| CPU | 8 | 256 | 432 ms | 20.6 ms | 19/s |
+| CPU | 32 | 256 | 1 508 ms | 14.0 ms | 21/s |
+| **MPS** | **16** | **128** | **160 ms** | **3.9 ms** | **100/s** |
+| **MPS** | **32** | **256** | **643 ms** | **8.4 ms** | **50/s** |
+
+MPS is **2.3× faster** than CPU. Use `--device mps` on Apple Silicon.
+
+### Recommended training runs
+
+```bash
+# Quick validation (13 min, MPS B=16 T=128)
+uv run python scripts/train.py --device mps --batch 16 --steps 5000
+
+# Quality run (54 min, MPS B=32 T=256)
+uv run python scripts/train.py --device mps --batch 32 --steps 5000
+
+# After Optuna tuning (use best_hparams.json params)
+uv run python scripts/train.py --device mps --steps 5000 \
+    --lr <best_lr> --embd <best_embd> --dropout <best_dropout>
+```
+
+### Hyperparameter tuning (Optuna)
+
+Three parameters are worth tuning; everything else is fixed by the parent repo's ablations.
+
+| Parameter | Search range | Why it matters |
+|---|---|---|
+| `learning_rate` | log-uniform [1e-4, 1e-3] | Biggest impact on convergence |
+| `n_embd` | {64, 128, 256} | Capacity vs. speed |
+| `dropout` | uniform [0.0, 0.25] | Regularisation for imbalanced corpus |
+
+Tuning runs at T=128 (fast); takes **~20 min for 25 trials** on MPS:
+
+```bash
+uv run python scripts/tune.py --device mps --trials 25 --trial-steps 300
+```

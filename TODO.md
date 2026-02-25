@@ -15,13 +15,20 @@
 - [x] README documenting architecture decision and two-role state design
 - [x] LOGBOOK entry
 
+## Done ✅ (continued)
+- [x] Benchmark: `uv run python scripts/benchmark.py` → real M1 numbers
+- [x] tqdm progress bars in training loop
+- [x] Fixed chunk_size default: 512→256 (4× faster; covers subject + body)
+- [x] Optuna study: `scripts/tune.py` — 25 trials × 300 steps ≈ 20 min on MPS
+
 ## Next Steps
 - [x] Run tests and fix any issues: `uv run pytest tests/ -v` → **34/34 passing**
 - [x] Install dependencies: `uv sync`
 - [ ] Download data: `uv run python scripts/download_data.py`
-- [ ] First training run: `uv run python scripts/train.py --steps 500 --device cpu`
+- [ ] (Optional but recommended) Tune: `uv run python scripts/tune.py --device mps`
+- [ ] First training run:
+      `uv run python scripts/train.py --device mps --batch 32 --steps 5000`
 - [ ] Evaluate actual F1 / precision / recall on held-out test set
-- [ ] Measure inference latency on a single email
 
 ## Future Work
 - [ ] Milter integration: connect filter to a Postfix/Dovecot server via pymilter

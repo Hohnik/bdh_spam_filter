@@ -23,6 +23,7 @@ import torch
 from torch import nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from ..model.classifier import BDHSpamClassifier
 
@@ -149,17 +150,23 @@ class Trainer:
         """Run training for max_steps gradient updates."""
         cfg = self.config
         print(
-            f"\nTraining BDHSpamClassifier  "
-            f"({self.model.parameter_count():,} params)  "
-            f"on {cfg.device}\n"
-            f"{'─'*60}"
+            f"\nBDHSpamClassifier  ({self.model.parameter_count():,} params)  "
+            f"on {cfg.device}"
         )
 
         train_iter = iter(self.train_loader)
-        t0 = time.perf_counter()
+        recent_losses: list[float] = []       # sliding window for smooth display
+
+        bar = tqdm(
+            total=cfg.max_steps,
+            initial=self._step,
+            unit="step",
+            dynamic_ncols=True,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} "
+                       "[{elapsed}<{remaining}, {rate_fmt}  {postfix}]",
+        )
 
         while self._step < cfg.max_steps:
-            # Cycle through the training set as many times as needed
             try:
                 token_ids, labels = next(train_iter)
             except StopIteration:
@@ -169,32 +176,45 @@ class Trainer:
             loss = self._train_step(token_ids, labels)
             self._step += 1
 
+            recent_losses.append(loss)
+            if len(recent_losses) > 20:
+                recent_losses.pop(0)
+
+            bar.update(1)
+            bar.set_postfix(
+                loss=f"{sum(recent_losses)/len(recent_losses):.4f}",
+                lr=f"{self.scheduler.get_last_lr()[0]:.1e}",
+            )
+
             # ── Periodic evaluation ──
             if self._step % cfg.eval_every == 0 or self._step == cfg.max_steps:
-                elapsed = time.perf_counter() - t0
                 metrics = _evaluate(self.model, self.val_loader, self.device)
-                lr      = self.scheduler.get_last_lr()[0]
 
-                print(
-                    f"step {self._step:>5d} | "
-                    f"loss {loss:.4f} | "
+                bar.set_postfix(
+                    loss=f"{sum(recent_losses)/len(recent_losses):.4f}",
+                    val_F1=f"{metrics['f1']:.4f}",
+                    prec=f"{metrics['precision']:.4f}",
+                    rec=f"{metrics['recall']:.4f}",
+                    lr=f"{self.scheduler.get_last_lr()[0]:.1e}",
+                )
+
+                # Print a summary line below the bar (tqdm.write keeps bar intact)
+                tqdm.write(
+                    f"  step {self._step:>5d} | "
                     f"val_loss {metrics['loss']:.4f} | "
                     f"F1 {metrics['f1']:.4f} | "
                     f"prec {metrics['precision']:.4f} | "
-                    f"rec {metrics['recall']:.4f} | "
-                    f"lr {lr:.2e} | "
-                    f"{elapsed:.0f}s"
+                    f"rec {metrics['recall']:.4f}"
                 )
 
                 if metrics["f1"] > self._best_f1:
                     self._best_f1 = metrics["f1"]
                     ckpt_path = (
                         Path(cfg.checkpoint_dir)
-                        / f"spam_filter_step{self._step:05d}_f1{metrics['f1']:.4f}.pt"
+                        / f"spam_step{self._step:05d}_f1{metrics['f1']:.4f}.pt"
                     )
                     self.model.save_checkpoint(str(ckpt_path))
-                    print(f"  ✓ New best F1 — checkpoint saved to {ckpt_path}")
+                    tqdm.write(f"  ✓ new best F1 → {ckpt_path.name}")
 
-                t0 = time.perf_counter()
-
-        print(f"\nTraining complete.  Best validation F1: {self._best_f1:.4f}")
+        bar.close()
+        print(f"\nDone.  Best validation F1: {self._best_f1:.4f}")

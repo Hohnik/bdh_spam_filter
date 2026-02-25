@@ -53,8 +53,13 @@ class SpamClassifierConfig:
     #
     # Keeping these separate avoids the bug where pos_offset = chunk_size falls
     # outside the RoPE table when processing the second chunk.
-    chunk_size:    int = 512
-    max_position:  int = 4096   # = max_email_bytes; RoPE table size
+    # Benchmark result (scripts/benchmark.py on M1 Mac):
+    #   T=128: 160ms/step MPS — covers subject only (~95% of short spam)
+    #   T=256: 632ms/step MPS — covers subject + body opening (~better quality)
+    #   T=512: 4324ms/step CPU, MPS B=32 timeout — overkill for most emails
+    # Default T=256: good balance. For quick experiments use T=128.
+    chunk_size:    int = 256
+    max_position:  int = 4096   # RoPE table — covers emails up to 4 096 bytes
     max_email_bytes: int = 4096
 
     use_grad_checkpoint: bool = False
