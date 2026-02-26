@@ -44,7 +44,12 @@ class TrainerConfig:
     checkpoint_dir: str = "checkpoints"
 
     # Device
-    device: str = "cpu"   # "cpu" | "mps" | "cuda"
+    device: str = "cpu"   # "cpu" | "mps" | "cuda" | "xla"
+
+    # XLA / TPU (Kaggle TPU kernels)
+    # When True: uses xm.optimizer_step() + xm.mark_step() instead of
+    # optimizer.step(). The 'device' field should be set to "xla".
+    use_xla: bool = False
 
 
 def _cosine_lr(step: int, cfg: TrainerConfig) -> float:
@@ -142,7 +147,14 @@ class Trainer:
         self.optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
-        self.optimizer.step()
+
+        if self.config.use_xla:
+            import torch_xla.core.xla_model as xm  # type: ignore[import]
+            xm.optimizer_step(self.optimizer)
+            xm.mark_step()
+        else:
+            self.optimizer.step()
+
         self.scheduler.step()
         return loss.item()
 
