@@ -87,14 +87,21 @@ def main() -> None:
         n_embd  = trial.suggest_categorical("n_embd", [64, 128, 256])
         dropout = trial.suggest_float("dropout", 0.0, 0.25)
 
+        # Keep MLP internal dim N ≈ 1024 regardless of n_embd.
+        # This is critical: n_embd=256 with mlp_mult=32 gives N=2048,
+        # which is 4× the benchmark size and causes 40× slowdown on MPS.
+        # By fixing N=1024 we compare architectures fairly (same throughput).
+        N_HEAD   = 4
+        mlp_mult = max(8, 1024 * N_HEAD // n_embd)   # 64→64, 128→32, 256→16
+
         config = SpamClassifierConfig(
             n_embd   = n_embd,
             n_layer  = 2,
-            n_head   = 4,
+            n_head   = N_HEAD,
             dropout  = dropout,
             diff_attn    = True,
             attn_window  = 64,
-            mlp_internal_dim_multiplier = 32,
+            mlp_internal_dim_multiplier = mlp_mult,
             chunk_size   = args.chunk_size,
             max_position = 4096,
             max_email_bytes = 4096,
@@ -169,15 +176,22 @@ def main() -> None:
     with open(out_path, "w") as f:
         json.dump({"f1": best.value, "params": best.params}, f, indent=2)
     print(f"\n  Saved to {out_path}")
+    best_embd     = best.params["n_embd"]
+    best_mlp_mult = max(8, 1024 * 4 // best_embd)   # same formula as in trials
+    lr_str        = f"{best.params['learning_rate']:.2e}"
     print(f"\n  Full training command:")
-    lr_str  = f"{best.params['learning_rate']:.2e}"
     print(
         f"    uv run python scripts/train.py"
         f" --device {args.device}"
         f" --steps 5000"
         f" --lr {lr_str}"
-        f" --embd {best.params['n_embd']}"
+        f" --embd {best_embd}"
+        f" --mlp-mult {best_mlp_mult}"
         f" --dropout {best.params['dropout']:.3f}"
+    )
+    print(
+        f"\n  (--mlp-mult {best_mlp_mult} keeps MLP internal dim N=1024, "
+        f"matching the speed benchmark.)"
     )
 
 
