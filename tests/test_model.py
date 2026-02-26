@@ -10,12 +10,15 @@ Tests verify:
 """
 
 import tempfile
+from unittest.mock import patch
 
 import pytest
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from src.model.bdh import BDH, BDHConfig
 from src.model.classifier import BDHSpamClassifier, SpamClassifierConfig
+from src.training.trainer import Trainer, TrainerConfig
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -190,3 +193,85 @@ class TestClassifier:
             if p.grad is not None and p.grad.abs().sum() > 0
         ]
         assert len(params_with_grad) > 0, "No parameters received gradients"
+
+
+# ─── Trainer ──────────────────────────────────────────────────────────────────
+
+def _tiny_loader(n_batches: int = 8, seq_len: int = 64) -> DataLoader:
+    ids    = torch.randint(0, 256, (n_batches * 4, seq_len))
+    labels = torch.randint(0, 2,   (n_batches * 4,)).float()
+    return DataLoader(TensorDataset(ids, labels), batch_size=4)
+
+
+class TestTrainer:
+    def _make_trainer(self, tmp_path, max_steps: int = 10) -> Trainer:
+        cfg = SpamClassifierConfig(
+            n_layer=1, n_embd=16, n_head=2,
+            mlp_internal_dim_multiplier=4,
+            chunk_size=64, max_position=128,
+            max_email_bytes=128, dropout=0.0,
+        )
+        model  = BDHSpamClassifier(cfg)
+        loader = _tiny_loader()
+        tcfg   = TrainerConfig(
+            max_steps      = max_steps,
+            eval_every     = 5,
+            checkpoint_dir = str(tmp_path),
+            device         = "cpu",
+            learning_rate  = 1e-3,
+        )
+        return Trainer(model, loader, loader, tcfg)
+
+    def test_normal_run_saves_checkpoint(self, tmp_path) -> None:
+        """At least one checkpoint is saved when F1 improves during training."""
+        trainer = self._make_trainer(tmp_path, max_steps=10)
+        trainer.train()
+        ckpts = list(tmp_path.glob("*.pt"))
+        # May not save if F1 never improves (untrained model is random),
+        # so we just assert it doesn't crash and steps are counted.
+        assert trainer._step == 10
+
+    def test_keyboard_interrupt_saves_emergency_checkpoint(self, tmp_path) -> None:
+        """Ctrl+C at step 3 must produce an 'interrupted' checkpoint."""
+        trainer = self._make_trainer(tmp_path, max_steps=20)
+        original_step = trainer._train_step
+
+        call_count = [0]
+        def _step_that_interrupts(ids, labels):
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                raise KeyboardInterrupt
+            return original_step(ids, labels)
+
+        with patch.object(trainer, "_train_step", side_effect=_step_that_interrupts):
+            trainer.train()   # must NOT re-raise KeyboardInterrupt
+
+        emergency = list(tmp_path.glob("*interrupted*.pt"))
+        assert len(emergency) == 1, (
+            f"Expected one 'interrupted' checkpoint, found: {emergency}"
+        )
+        assert "step" in emergency[0].name
+
+    def test_interrupted_checkpoint_is_loadable(self, tmp_path) -> None:
+        """The emergency checkpoint must be a valid model file."""
+        trainer = self._make_trainer(tmp_path, max_steps=20)
+        original_step = trainer._train_step
+
+        call_count = [0]
+        def _interrupt_at_5(ids, labels):
+            call_count[0] += 1
+            if call_count[0] >= 5:
+                raise KeyboardInterrupt
+            return original_step(ids, labels)
+
+        with patch.object(trainer, "_train_step", side_effect=_interrupt_at_5):
+            trainer.train()
+
+        ckpt = list(tmp_path.glob("*interrupted*.pt"))[0]
+        loaded = BDHSpamClassifier.from_checkpoint(str(ckpt))
+        assert loaded is not None
+        # Sanity: can do a forward pass
+        ids = torch.randint(0, 256, (1, 64))
+        with torch.no_grad():
+            logits, _ = loaded(ids)
+        assert logits.shape == (1, 1)

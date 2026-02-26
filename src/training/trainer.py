@@ -166,55 +166,70 @@ class Trainer:
                        "[{elapsed}<{remaining}, {rate_fmt}  {postfix}]",
         )
 
-        while self._step < cfg.max_steps:
-            try:
-                token_ids, labels = next(train_iter)
-            except StopIteration:
-                train_iter = iter(self.train_loader)
-                token_ids, labels = next(train_iter)
+        try:
+            while self._step < cfg.max_steps:
+                try:
+                    token_ids, labels = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(self.train_loader)
+                    token_ids, labels = next(train_iter)
 
-            loss = self._train_step(token_ids, labels)
-            self._step += 1
+                loss = self._train_step(token_ids, labels)
+                self._step += 1
 
-            recent_losses.append(loss)
-            if len(recent_losses) > 20:
-                recent_losses.pop(0)
+                recent_losses.append(loss)
+                if len(recent_losses) > 20:
+                    recent_losses.pop(0)
 
-            bar.update(1)
-            bar.set_postfix(
-                loss=f"{sum(recent_losses)/len(recent_losses):.4f}",
-                lr=f"{self.scheduler.get_last_lr()[0]:.1e}",
-            )
-
-            # ── Periodic evaluation ──
-            if self._step % cfg.eval_every == 0 or self._step == cfg.max_steps:
-                metrics = _evaluate(self.model, self.val_loader, self.device)
-
+                bar.update(1)
                 bar.set_postfix(
                     loss=f"{sum(recent_losses)/len(recent_losses):.4f}",
-                    val_F1=f"{metrics['f1']:.4f}",
-                    prec=f"{metrics['precision']:.4f}",
-                    rec=f"{metrics['recall']:.4f}",
                     lr=f"{self.scheduler.get_last_lr()[0]:.1e}",
                 )
 
-                # Print a summary line below the bar (tqdm.write keeps bar intact)
-                tqdm.write(
-                    f"  step {self._step:>5d} | "
-                    f"val_loss {metrics['loss']:.4f} | "
-                    f"F1 {metrics['f1']:.4f} | "
-                    f"prec {metrics['precision']:.4f} | "
-                    f"rec {metrics['recall']:.4f}"
-                )
+                # ── Periodic evaluation ──
+                if self._step % cfg.eval_every == 0 or self._step == cfg.max_steps:
+                    self._eval_and_checkpoint(recent_losses)
 
-                if metrics["f1"] > self._best_f1:
-                    self._best_f1 = metrics["f1"]
-                    ckpt_path = (
-                        Path(cfg.checkpoint_dir)
-                        / f"spam_step{self._step:05d}_f1{metrics['f1']:.4f}.pt"
-                    )
-                    self.model.save_checkpoint(str(ckpt_path))
-                    tqdm.write(f"  ✓ new best F1 → {ckpt_path.name}")
+        except KeyboardInterrupt:
+            bar.close()
+            print("\n\nInterrupted — saving emergency checkpoint …")
+            self._save_checkpoint(tag="interrupted")
+            print(
+                f"  Saved at step {self._step}  "
+                f"(best F1 so far: {self._best_f1:.4f})\n"
+                f"  Resume with:  --checkpoint checkpoints/interrupted_step*.pt"
+            )
+            return
 
         bar.close()
         print(f"\nDone.  Best validation F1: {self._best_f1:.4f}")
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _eval_and_checkpoint(self, recent_losses: list[float]) -> None:
+        """Evaluate on val set; save if F1 improved."""
+        metrics = _evaluate(self.model, self.val_loader, self.device)
+
+        tqdm.write(
+            f"  step {self._step:>5d} | "
+            f"val_loss {metrics['loss']:.4f} | "
+            f"F1 {metrics['f1']:.4f} | "
+            f"prec {metrics['precision']:.4f} | "
+            f"rec {metrics['recall']:.4f}"
+        )
+
+        if metrics["f1"] > self._best_f1:
+            self._best_f1 = metrics["f1"]
+            self._save_checkpoint(tag=f"f1{metrics['f1']:.4f}")
+            tqdm.write(
+                f"  ✓ new best F1 → "
+                f"spam_step{self._step:05d}_f1{metrics['f1']:.4f}.pt"
+            )
+
+    def _save_checkpoint(self, tag: str) -> str:
+        """Save the model and return the checkpoint path."""
+        name = f"spam_step{self._step:05d}_{tag}.pt"
+        path = Path(self.config.checkpoint_dir) / name
+        self.model.save_checkpoint(str(path))
+        return str(path)

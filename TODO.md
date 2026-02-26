@@ -24,8 +24,8 @@
 ## Next Steps
 - [x] Run tests and fix any issues: `uv run pytest tests/ -v` → **34/34 passing**
 - [x] Install dependencies: `uv sync`
-- [ ] Download data: `uv run python scripts/download_data.py`
-- [ ] (Optional but recommended) Tune: `uv run python scripts/tune.py --device mps`
+- [x] Download data: `uv run python scripts/download_data.py`
+- [x] (Optional but recommended) Tune: `uv run python scripts/tune.py --device mps`
 - [ ] First training run:
       `uv run python scripts/train.py --device mps --batch 32 --steps 5000`
 - [ ] Evaluate actual F1 / precision / recall on held-out test set

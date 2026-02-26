@@ -1,3 +1,10 @@
+[private]
+default:
+  @just --list --unsorted
+
+# Check inbox for SPAM mail
+check:
+  uv run scripts/check_mail.py --dry-run
 
 # Download the training data
 download:
@@ -11,5 +18,4 @@ tune:
 train lr embd dropout: 
   uv run python scripts/train.py --device mps --batch 32 --steps 5000 \
          --lr {{lr}} --embd {{embd}} --dropout {{dropout}}
-
 
