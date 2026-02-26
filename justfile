@@ -15,7 +15,6 @@ tune:
   uv run scripts/tune.py --device mps --trials 25 --trial-steps 300
 
 # Train full model
-train lr embd dropout: 
-  uv run python scripts/train.py --device mps --batch 32 --steps 5000 \
-         --lr {{lr}} --embd {{embd}} --dropout {{dropout}}
+train: 
+  uv run python scripts/kaggle_push.py --lr 4.09e-4 --embd 256 --mlp-mult 16 --dropout 0.114
 

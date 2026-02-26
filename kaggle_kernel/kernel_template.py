@@ -1,50 +1,53 @@
 """BDH Spam Filter — Kaggle training kernel.
 
-This file is a TEMPLATE. kaggle_push.py fills in the __CONF_*__ placeholders
-and uploads the result as kernel.py.  Do not edit the placeholders directly;
-change the arguments passed to kaggle_push.py instead.
+Self-contained: the entire src/ package is embedded as a base64 gzip tarball
+(__CONF_SRC_TAR_B64__).  No Kaggle dataset dependency — no race conditions,
+no mounting delays, no version mismatches.
 
-Training config injected at push time:
-  n_embd   = __CONF_N_EMBD__
-  mlp_mult = __CONF_MLP_MULT__
-  dropout  = __CONF_DROPOUT__
-  lr       = __CONF_LR__
-  steps    = __CONF_STEPS__
-  batch    = __CONF_BATCH__
-  use_tpu  = __CONF_USE_TPU__
-
-Source dataset slug (on Kaggle):  __CONF_DATASET_SLUG__
+kaggle_push.py fills in all __CONF_*__ placeholders before pushing.
 """
 
-# ─── Kernel bootstrap ─────────────────────────────────────────────────────────
+# ─── Bootstrap: extract embedded source ──────────────────────────────────────
+import base64
+import io
 import os
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
-# Install packages that aren't pre-installed on Kaggle GPU/TPU images.
-# torch + torchvision are pre-installed; we only need these extras.
+_SRC_B64 = "__CONF_SRC_TAR_B64__"
+
+_WORK = Path("/kaggle/working")
+_WORK.mkdir(exist_ok=True)
+
+print("Extracting embedded source …", flush=True)
+_tar_bytes = base64.b64decode(_SRC_B64)
+with tarfile.open(fileobj=io.BytesIO(_tar_bytes), mode="r:gz") as _tar:
+    _tar.extractall(str(_WORK))
+
+# Verify extraction
+_src_pkg = _WORK / "src"
+if not _src_pkg.exists():
+    raise RuntimeError(
+        f"src/ not found after extraction. "
+        f"Contents of {_WORK}: {list(_WORK.iterdir())}"
+    )
+sys.path.insert(0, str(_WORK))
+print(f"  Source ready at {_src_pkg} ({len(list(_src_pkg.rglob('*.py')))} files)")
+
+# ─── Install missing packages ─────────────────────────────────────────────────
 _DEPS = ["datasets", "huggingface_hub", "tqdm", "filelock"]
+print(f"Installing: {' '.join(_DEPS)} …", flush=True)
 subprocess.run(
     [sys.executable, "-m", "pip", "install", "-q"] + _DEPS,
     check=True,
 )
 
-# Mount source code from the companion Kaggle dataset.
-# kaggle_push.py uploads src/ as a dataset; it is mounted at /kaggle/input/<slug>.
-_SRC_DIR = "/kaggle/input/__CONF_DATASET_SLUG__"
-if not Path(_SRC_DIR).exists():
-    raise RuntimeError(
-        f"Source dataset not found at {_SRC_DIR}.\n"
-        "Make sure the dataset is added as an input to this kernel."
-    )
-sys.path.insert(0, _SRC_DIR)
-
 # ─── Device setup ─────────────────────────────────────────────────────────────
-_USE_TPU = __CONF_USE_TPU__   # bool injected by kaggle_push.py
+_USE_TPU = __CONF_USE_TPU__
 
 if _USE_TPU:
-    # torch_xla is pre-installed on Kaggle TPU instances
     try:
         import torch_xla                          # type: ignore[import]
         import torch_xla.core.xla_model as xm    # type: ignore[import]
@@ -62,10 +65,9 @@ else:
         print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     else:
         _device_str = "cpu"
-        print("Device: CPU (no GPU/TPU found)")
+        print("Device: CPU (no GPU/TPU found — training will be slow)")
 
 # ─── Training config ──────────────────────────────────────────────────────────
-# All values below are filled in by kaggle_push.py at push time.
 _N_EMBD   = __CONF_N_EMBD__
 _MLP_MULT = __CONF_MLP_MULT__
 _DROPOUT  = __CONF_DROPOUT__
@@ -76,17 +78,18 @@ _WARMUP   = max(200, _STEPS // 10)
 _EVAL_EVERY = max(100, _STEPS // 25)
 
 print(
-    f"\nConfig:  n_embd={_N_EMBD}  mlp_mult={_MLP_MULT}  dropout={_DROPOUT}  "
-    f"lr={_LR}  steps={_STEPS}  batch={_BATCH}"
+    f"\nConfig:  n_embd={_N_EMBD}  mlp_mult={_MLP_MULT}  "
+    f"N={_N_EMBD * _MLP_MULT // 4}/head\n"
+    f"         dropout={_DROPOUT}  lr={_LR}  "
+    f"steps={_STEPS}  batch={_BATCH}  device={_device_str.upper()}"
 )
-print(f"  MLP internal dim N = {_N_EMBD * _MLP_MULT // 4} per head")
 
 # ─── Data ─────────────────────────────────────────────────────────────────────
 from src.data.download import download_all        # noqa: E402
 from src.data.dataset import build_dataloaders   # noqa: E402
 
-_DATA_DIR  = Path("/kaggle/working/data")
-_CKPT_DIR  = Path("/kaggle/working/checkpoints")
+_DATA_DIR = _WORK / "data"
+_CKPT_DIR = _WORK / "checkpoints"
 _CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
 print("\nDownloading training data …")
@@ -105,7 +108,6 @@ _model_cfg = SpamClassifierConfig(
     max_position                = 4096,
     max_email_bytes             = 4096,
 )
-
 _train_loader, _val_loader = build_dataloaders(
     samples,
     seq_len         = _model_cfg.chunk_size,
@@ -115,7 +117,7 @@ _train_loader, _val_loader = build_dataloaders(
 
 # ─── Model ────────────────────────────────────────────────────────────────────
 _model = BDHSpamClassifier(_model_cfg)
-print(f"\nModel: {_model.parameter_count():,} parameters  on {_device_str.upper()}")
+print(f"\nModel: {_model.parameter_count():,} parameters on {_device_str.upper()}")
 
 # ─── Train ────────────────────────────────────────────────────────────────────
 _trainer_cfg = TrainerConfig(
@@ -127,16 +129,15 @@ _trainer_cfg = TrainerConfig(
     device         = _device_str,
     use_xla        = _USE_TPU,
 )
-
 _trainer = Trainer(_model, _train_loader, _val_loader, _trainer_cfg)
 _trainer.train()
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 _checkpoints = sorted(_CKPT_DIR.glob("*.pt"))
 if _checkpoints:
-    print(f"\nCheckpoints saved ({len(_checkpoints)} file(s)):")
+    print(f"\nCheckpoints ({len(_checkpoints)} file(s)):")
     for p in _checkpoints:
         print(f"  {p.name}  ({p.stat().st_size / 1e6:.1f} MB)")
-    print("\nDownload via:  uv run python scripts/kaggle_push.py --download-only")
+    print("\nDownload:  uv run python scripts/kaggle_push.py --download-only")
 else:
-    print("\nWARNING: No checkpoints found. Training may have failed.")
+    print("\nWARNING: No checkpoints saved (val F1 may not have improved).")

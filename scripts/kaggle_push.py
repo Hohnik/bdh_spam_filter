@@ -18,9 +18,6 @@ Usage
   # TPU (experimental — slower to start but free 30 h/week separately):
   uv run python scripts/kaggle_push.py --tpu
 
-  # Code didn't change, just re-run training:
-  uv run python scripts/kaggle_push.py --skip-upload
-
   # Fetch results from a previous run without re-training:
   uv run python scripts/kaggle_push.py --download-only
 
@@ -48,7 +45,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-_DATASET_SLUG = "bdh-spam-filter-src"
 _KERNEL_SLUG  = "bdh-spam-training"
 
 
@@ -81,66 +77,42 @@ def _get_username(api) -> str:
 
 # ─── Dataset upload ───────────────────────────────────────────────────────────
 
-def _upload_source_dataset(api, username: str) -> None:
-    """Sync src/ to a private Kaggle dataset. Creates it on first run."""
+def _embed_source() -> str:
+    """Return src/ as a base64-encoded gzipped tarball string.
+
+    Embedding the source directly in the kernel script eliminates:
+      - Kaggle dataset mounting delays / race conditions
+      - Dataset version propagation issues
+      - The need to maintain a separate Kaggle dataset
+    """
+    import base64
+    import io
+    import tarfile as _tar_mod
+
     project_root = Path(__file__).parent.parent
-    full_ref     = f"{username}/{_DATASET_SLUG}"
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-
-        # Copy src/ (strip __pycache__ to keep the upload small)
-        dst = tmp_path / "src"
-        shutil.copytree(project_root / "src", dst)
-        for cache in dst.rglob("__pycache__"):
-            shutil.rmtree(cache)
-
-        # Metadata (exact format from api.dataset_initialize())
-        meta = {
-            "title":    "BDH Spam Filter Source",
-            "id":       full_ref,
-            "licenses": [{"name": "CC0-1.0"}],
-        }
-        (tmp_path / "dataset-metadata.json").write_text(json.dumps(meta, indent=2))
-
-        # Check whether the dataset already exists
-        try:
-            api.dataset_status(full_ref)
-            exists = True
-        except Exception:
-            exists = False
-
-        if exists:
-            print(f"Uploading new dataset version: {full_ref} …")
-            api.dataset_create_version(
-                str(tmp_path),
-                version_notes = "Code update",
-                quiet         = False,
-                convert_to_csv = False,
-                dir_mode      = "zip",
-            )
-        else:
-            print(f"Creating new dataset: {full_ref} …")
-            api.dataset_create_new(
-                str(tmp_path),
-                public        = False,
-                quiet         = False,
-                convert_to_csv = False,
-                dir_mode      = "zip",
-            )
-
-    print(f"  Dataset ready → https://www.kaggle.com/datasets/{full_ref}\n")
+    buf = io.BytesIO()
+    with _tar_mod.open(fileobj=buf, mode="w:gz") as tar:
+        for f in sorted((project_root / "src").rglob("*.py")):
+            if "__pycache__" not in str(f):
+                tar.add(f, arcname=str(f.relative_to(project_root)))
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 # ─── Kernel push ──────────────────────────────────────────────────────────────
 
 def _push_kernel(api, username: str, args: argparse.Namespace) -> None:
-    """Generate kernel.py from the template and push to Kaggle."""
-    template_path = Path(__file__).parent.parent / "kaggle_kernel" / "kernel_template.py"
+    """Embed src/, fill template, and push kernel to Kaggle."""
+    project_root  = Path(__file__).parent.parent
+    template_path = project_root / "kaggle_kernel" / "kernel_template.py"
     template      = template_path.read_text(encoding="utf-8")
+
+    print("Embedding source code …", end="", flush=True)
+    src_b64    = _embed_source()
+    print(f" {len(src_b64)//1024} KB")
 
     kernel_src = (
         template
+        .replace("__CONF_SRC_TAR_B64__", src_b64)
         .replace("__CONF_N_EMBD__",       str(args.embd))
         .replace("__CONF_MLP_MULT__",     str(args.mlp_mult))
         .replace("__CONF_DROPOUT__",      str(args.dropout))
@@ -148,24 +120,29 @@ def _push_kernel(api, username: str, args: argparse.Namespace) -> None:
         .replace("__CONF_STEPS__",        str(args.steps))
         .replace("__CONF_BATCH__",        str(args.batch))
         .replace("__CONF_USE_TPU__",      "True" if args.tpu else "False")
-        .replace("__CONF_DATASET_SLUG__", _DATASET_SLUG)
     )
 
-    # kernel-metadata.json — exact field names and string booleans as Kaggle expects
+    # kernel-metadata.json
+    # Lessons learned from live testing:
+    #   - title must slugify to exactly the id slug:
+    #     "BDH Spam Training" → "bdh-spam-training" ✓
+    #   - enable_gpu / enable_internet must be JSON booleans (True/False in Python
+    #     → true/false in JSON), NOT strings — strings are silently ignored
+    #   - No dataset_sources needed (source is embedded)
     meta = {
-        "id":           f"{username}/{_KERNEL_SLUG}",
-        "title":        "BDH Spam Filter Training",
-        "code_file":    "kernel.py",
-        "language":     "python",
-        "kernel_type":  "script",
-        "is_private":   "true",
-        "enable_gpu":   "false" if args.tpu else "true",
-        "enable_tpu":   "true"  if args.tpu else "false",
-        "enable_internet": "true",
-        "dataset_sources":    [f"{username}/{_DATASET_SLUG}"],
+        "id":              f"{username}/{_KERNEL_SLUG}",
+        "title":           "BDH Spam Training",   # slugifies to bdh-spam-training
+        "code_file":       "kernel.py",
+        "language":        "python",
+        "kernel_type":     "script",
+        "is_private":      True,
+        "enable_gpu":      not args.tpu,
+        "enable_tpu":      args.tpu,
+        "enable_internet": True,                  # needed: HuggingFace + SpamAssassin
+        "dataset_sources":     [],
         "competition_sources": [],
-        "kernel_sources":     [],
-        "model_sources":      [],
+        "kernel_sources":      [],
+        "model_sources":       [],
     }
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -175,7 +152,7 @@ def _push_kernel(api, username: str, args: argparse.Namespace) -> None:
 
         accelerator = "TPU v3-8" if args.tpu else "GPU (T4/P100)"
         print(f"Pushing kernel → {username}/{_KERNEL_SLUG}  [{accelerator}] …")
-        response = api.kernels_push(str(tmp_path))
+        api.kernels_push(str(tmp_path))
 
     print(f"  Queued ✓")
     print(f"  Live logs → https://www.kaggle.com/code/{username}/{_KERNEL_SLUG}\n")
@@ -274,7 +251,6 @@ def main() -> None:
     parser.add_argument("--dropout",      type=float, default=0.1,   help="Dropout (default: 0.1)")
     parser.add_argument("--batch",        type=int,   default=32,    help="Batch size (default: 32)")
     parser.add_argument("--tpu",          action="store_true",       help="Use TPU v3-8 instead of GPU")
-    parser.add_argument("--skip-upload",  action="store_true",       help="Skip dataset sync (code unchanged)")
     parser.add_argument("--download-only",action="store_true",       help="Download results from last run")
     parser.add_argument("--output-dir",   default="checkpoints",     help="Local dir for downloaded files")
     args = parser.parse_args()
@@ -292,11 +268,6 @@ def main() -> None:
     if args.download_only:
         _download(api, username, output_dir)
         return
-
-    if not args.skip_upload:
-        _upload_source_dataset(api, username)
-    else:
-        print(f"Skipping dataset upload (--skip-upload).\n")
 
     print(
         f"Config:  n_embd={args.embd}  mlp_mult={args.mlp_mult}  "
