@@ -16,5 +16,7 @@ tune:
 
 # Train full model
 train: 
-  uv run python scripts/kaggle_push.py --lr 4.09e-4 --embd 256 --mlp-mult 16 --dropout 0.114
+  uv run scripts/kaggle_push.py --lr 4.09e-4 --embd 256 --mlp-mult 16 --dropout 0.114
 
+download-model: 
+  uv run scripts/kaggle_push.py --download-only
